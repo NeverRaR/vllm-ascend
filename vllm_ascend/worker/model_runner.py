@@ -1144,7 +1144,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
                     dtype=self.model_config.dtype,
                     device=self.device)
 
-            self.execute_model(model_input, kv_caches, intermediate_tensors)
+            self.execute_model(model_input, kv_caches, intermediate_tensors, )
             torch_npu.npu.synchronize()
             return
 

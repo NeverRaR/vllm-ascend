@@ -21,12 +21,19 @@ import os
 
 from vllm import LLM, SamplingParams
 
-os.environ["VLLM_USE_V1"] = "0"
+os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_COMPILATION_LEVEL"] = "1"  # 设置优化级别为 1
 #os.environ["VLLM_MLA_DISABLE"] = "1"
+from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
+                         set_current_vllm_config)
+import torch._dynamo
+torch._dynamo.config.cache_size_limit = 256
+
 
 if __name__ == "__main__":
     prompts = [
+        #"Who are you?"
         "Hello, my name is",
         "The president of the United States is",
         "The capital of France is",
@@ -36,10 +43,17 @@ if __name__ == "__main__":
     # Create a sampling params object.
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     # Create an LLM.
-    llm = LLM(model="/mnt/deepseek/DeepSeek-V2-Lite",
+    llm = LLM(
+              #model="/data/weights/deepseek-ai/deepseekv3-lite-base-latest",
+              model="/mnt/deepseek/DeepSeek-V2-Lite",
               tensor_parallel_size=2,
-              enforce_eager=True,
+              enforce_eager=False,
               trust_remote_code=True,
+              max_num_seqs=16,
+              additional_config={
+                  'enable_graph_mode': True,
+                  'ascend_scheduler_config':{},
+              },
               max_model_len=1024)
 
     # Generate texts from the prompts.

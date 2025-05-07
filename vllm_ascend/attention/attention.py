@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from vllm.logger import logger
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -935,6 +936,15 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
 
+        #torchair.ops.npu_print("hs shape ", torch.tensor(hidden_states.shape))
+        #torchair.ops.npu_print("hs", hidden_states)
+        #torchair.ops.npu_print("cos shape ", torch.tensor(cos.shape))
+        #torchair.ops.npu_print("cos", cos)
+        #torchair.ops.npu_print("sin shape ", torch.tensor(sin.shape))
+        #torchair.ops.npu_print("sin", sin)
+        #torchair.ops.npu_print("slots shape ", torch.tensor(slots.shape))
+        #torchair.ops.npu_print("slots", slots)
+
         k_pe, k_nope = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
@@ -946,6 +956,14 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             epsilon=self.kv_a_layernorm.variance_epsilon,
             cache_mode="PA",
         )
+        ##torchair.ops.npu_print("after slots shape ", torch.tensor(slots.shape))
+        ##torchair.ops.npu_print("after slots", slots)
+        ##torchair.ops.npu_print("k_pe shape ", torch.tensor(k_pe.shape))
+        ##torchair.ops.npu_print("k_pe", k_pe)
+        ##torchair.ops.npu_print("k_nope shape ", torch.tensor(k_nope.shape))
+        ##torchair.ops.npu_print("k_nope", k_nope)
+        #torchair.ops.npu_print("decode k_pe", k_pe[0], summarize_size = 8)
+        #torchair.ops.npu_print("decode k_nope", k_nope[0], summarize_size = 8)
 
         return k_pe, k_nope
 
@@ -1054,6 +1072,12 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             q_pe = self.rope_single(q_pe, cos, sin)
             k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, cos, sin,
                                         kv_cache, attn_metadata.slot_mapping)
+            ##torchair.ops.npu_print("decode_k_pe shape", torch.tensor(k_pe.shape))
+            ##torchair.ops.npu_print("decode_k_pe", k_pe)
+            ##torchair.ops.npu_print("decode_q_pe shape", torch.tensor(q_pe.shape))
+            ##torchair.ops.npu_print("cos", cos)
+            ##torchair.ops.npu_print("sin", sin)
+            ##torchair.ops.npu_print("decode_q_pe", q_pe)
         else:
             if k_pe is None:
                 # NOTE: k_pe is None when graph mode enabled
@@ -1063,6 +1087,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
             else:
                 kv_c_normed = hidden_states_or_kv_c_normed
+            #print(f"hs:{hidden_states_or_q_c}")
+            #print(f"prefill_q: {q}")
+            #print(f"before q pe: {q_pe}")
+            #print(f"before k pe: {k_pe}")
             k_pe = k_pe.view(num_tokens, self.num_kv_heads, -1)
             if self.rotary_emb.__class__.__name__ == 'RotaryEmbedding':
                 # NOTE: When scaling not specified
@@ -1076,6 +1104,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             else:
                 q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions,
                                              q_pe, k_pe)
+            ##torchair.ops.npu_print("prefill k_pe", k_pe, summarize_size = 8)
 
         if attn_metadata.num_prefills > 0:
             kv = self.kv_b_proj(kv_c_normed)[0].view(num_tokens,
@@ -1102,6 +1131,9 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
+                ##torchair.ops.npu_print("cache k_pe", k_pe, summarize_size = 8)
+                ##torchair.ops.npu_print("cache slots", slots)
+                ##torchair.ops.npu_print("cache kv_cache", kv_cache[1][0], summarize_size = 8)
         else:
             if kv_cache.numel() > 0:
                 key = torch.cat([
@@ -1169,6 +1201,12 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                     block_size=kv_cache[0].shape[1],
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
                 )
+                
+                ##torchair.ops.npu_print("actual_seq_lengths_kv", attn_metadata.seq_lens_tensor)
+                ##torchair.ops.npu_print("block_table shape", torch.tensor(attn_metadata.block_tables.shape))
+                ##torchair.ops.npu_print("block_table", attn_metadata.block_tables)
+                ##torchair.ops.npu_print("attn_output shape", torch.tensor(attn_output.shape))
+                ##torchair.ops.npu_print("attn_output",attn_output)
                 attn_output = attn_output.view(num_tokens, -1,
                                                self.kv_lora_rank).transpose(
                                                    0, 1)
@@ -1194,6 +1232,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                     context_lens=self.seq_lens_tensor_cpu,
                     mla_vheadsize=self.kv_lora_rank,
                     out=attn_output)
+
                 attn_output_t = torch.transpose(attn_output, 0, 1)
                 attn_output_t = torch.bmm(attn_output_t, self.w_vc)
                 attn_output = torch.transpose(attn_output_t, 0, 1)

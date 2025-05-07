@@ -64,7 +64,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-
+import torchair
 
 class CustomDeepseekV2MoE(nn.Module):
 
@@ -143,15 +143,17 @@ class CustomDeepseekV2MoE(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # for profile run
+            is_prefill = True
             return hidden_states
+        else:
+            is_prefill = attn_metadata.num_prefills > 0
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
 
-        if (self.tp_size > 1 and self.enable_mc2
-                and attn_metadata.num_prefills == 0):
+        if (self.tp_size > 1 and self.enable_mc2 and not is_prefill):
             chunks = torch.chunk(hidden_states,
                                  get_tp_group().world_size,
                                  dim=0)
@@ -159,8 +161,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        is_prefill = True if attn_metadata.num_prefills > 0 else False
-        # is_prefill = attn_metadata.num_prefills > 0
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -326,14 +326,38 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             hidden_states_or_q_c = hidden_states
         if self.enable_graph_mode:
-            return self.mla_attn.impl.forward(self.mla_attn,
+            mla_kwargs = {}
+            if os.getenv("VLLM_USE_V1") == "1":
+                output_shape = hidden_states.shape
+                output = torch.empty(output_shape,
+                                 dtype=hidden_states_or_q_c.dtype,
+                                 device=hidden_states_or_q_c.device)
+                mla_kwargs['output'] = output
+            
+            output = self.mla_attn.impl.forward(self.mla_attn,
                                               hidden_states_or_q_c,
                                               hidden_states, None, kv_cache,
-                                              attn_metadata)
+                                              attn_metadata, **mla_kwargs)
+            if os.getenv("VLLM_USE_V1") == "1":
+                return output.view(-1, output_shape[-1])
+            else:
+                return output
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+
+            output_shape = hidden_states.shape
+            output = torch.empty(output_shape,
+                                 dtype=hidden_states_or_q_c.dtype,
+                                 device=hidden_states_or_q_c.device)
+
+            return self.mla_attn.impl.forward(self.mla_attn,
+                                              hidden_states_or_q_c,
+                                              kv_c_normed, k_pe, kv_cache,
+                                              attn_metadata, output)
+
+
             return self.mla_attn(hidden_states_or_q_c,
                                  kv_c_normed,
                                  k_pe,
@@ -350,6 +374,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
+        self.use_mla =  model_config.use_mla
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -420,12 +445,21 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        if self.use_mla:
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+            )
+        else:
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                #kv_cache=kv_cache,
+                #attn_metadata=attn_metadata,
+            )
+        
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
